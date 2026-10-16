@@ -1,0 +1,18 @@
+# ROS 2 build output
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Output written by the results logger
+results/*
+!results/.gitkeep
+
+# LaTeX build files
+report/*.aux
+report/*.log
+report/*.out
+report/*.toc

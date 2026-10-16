@@ -1,0 +1,188 @@
+###############################################################################
+# MCL Particle Filter – docker-compose
+#
+# Usage:
+#   1. Allow X11 access:   xhost +local:docker
+#   2. Build:              docker compose build
+#   3. Run everything:     docker compose up
+#   4. Use another map:    MAP=map2 docker compose up      (map, map2, map3, map4)
+#   5. (Optional) Run only a specific service:
+#          docker compose up map_server robot mcl rviz
+#          docker compose up plots        # in another terminal
+###############################################################################
+
+services:
+  # ── Map server ─────────────────────────────────────────────────────────────
+  map_server:
+    build: .
+    image: mcl_irpp_project:latest
+    container_name: mcl_map_server
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command:
+      - bash
+      - -c
+      - |
+        ros2 run nav2_map_server map_server --ros-args -p yaml_filename:=/home/ubuntu/mcl_ws/maps/${MAP:-map4}.yaml -p use_sim_time:=false &
+        MAP_PID=$$!
+        sleep 4
+        ros2 lifecycle set /map_server configure
+        sleep 2
+        ros2 lifecycle set /map_server activate
+        echo '=== Map server ACTIVE ==='
+        wait $$MAP_PID
+
+  # ── Simulated robot ───────────────────────────────────────────────────────
+  robot:
+    image: mcl_irpp_project:latest
+    container_name: mcl_robot
+    depends_on:
+      - map_server
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 12 && ros2 run mcl_robot simple_robot"
+
+  # ── MCL localizer ─────────────────────────────────────────────────────────
+  mcl:
+    image: mcl_irpp_project:latest
+    container_name: mcl_localizer
+    depends_on:
+      - map_server
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 14 && ros2 run mcl_localization mcl_node"
+
+  # ── RViz visualization ────────────────────────────────────────────────────
+  rviz:
+    image: mcl_irpp_project:latest
+    container_name: mcl_rviz
+    depends_on:
+      - map_server
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 15 && rviz2 -d /home/ubuntu/mcl_ws/rviz/mcl.rviz"
+
+  # ── Live matplotlib plots ─────────────────────────────────────────────────
+  plots:
+    image: mcl_irpp_project:latest
+    container_name: mcl_plots
+    depends_on:
+      - mcl
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 18 && python3 /home/ubuntu/mcl_ws/plots/mcl_plots.py"
+
+  # ── Scan bridge (generates LaserScan + odom TF for AMCL) ──────────────────
+  scan_bridge:
+    image: mcl_irpp_project:latest
+    container_name: mcl_scan_bridge
+    depends_on:
+      - map_server
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 13 && python3 /home/ubuntu/mcl_ws/bridge/scan_bridge.py"
+
+  # ── Nav2 AMCL (existing MCL package for comparison) ───────────────────────
+  amcl:
+    image: mcl_irpp_project:latest
+    container_name: mcl_amcl
+    depends_on:
+      - map_server
+      - scan_bridge
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command:
+      - bash
+      - -c
+      - |
+        sleep 16
+        ros2 run nav2_amcl amcl --ros-args --params-file /home/ubuntu/mcl_ws/bridge/amcl_params.yaml -r particle_cloud:=/amcl_particles &
+        AMCL_PID=$$!
+        sleep 5
+        ros2 lifecycle set /amcl configure
+        sleep 2
+        ros2 lifecycle set /amcl activate
+        sleep 2
+        ros2 service call /reinitialize_global_localization std_srvs/srv/Empty
+        echo '=== AMCL ACTIVE (global localization) ==='
+        wait $$AMCL_PID
+
+  # ── AMCL particle cloud for RViz (thinned out) ────────────────────────────
+  amcl_viz:
+    image: mcl_irpp_project:latest
+    container_name: mcl_amcl_viz
+    depends_on:
+      - amcl
+    environment:
+      - ROS_DOMAIN_ID=42
+    network_mode: host
+    command: >
+      bash -c "sleep 16 && exec python3 /home/ubuntu/mcl_ws/bridge/amcl_particle_viz.py"
+
+  # ── Comparison plotter (Custom MCL vs AMCL) ───────────────────────────────
+  comparison:
+    image: mcl_irpp_project:latest
+    container_name: mcl_comparison
+    depends_on:
+      - mcl
+      - amcl
+    environment:
+      - DISPLAY=${DISPLAY}
+      - ROS_DOMAIN_ID=42
+      - QT_X11_NO_MITSHM=1
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    command: >
+      bash -c "sleep 28 && python3 /home/ubuntu/mcl_ws/plots/comparison_plot.py"
+
+  # ── Results logger (saves CSV + summary plot to ./results) ────────────────
+  logger:
+    image: mcl_irpp_project:latest
+    container_name: mcl_logger
+    depends_on:
+      - mcl
+      - amcl
+    environment:
+      - ROS_DOMAIN_ID=42
+    volumes:
+      - ./results:/home/ubuntu/mcl_ws/results:rw
+    network_mode: host
+    stop_signal: SIGINT
+    command: >
+      bash -c "sleep 20 && exec python3 /home/ubuntu/mcl_ws/plots/results_logger.py"
